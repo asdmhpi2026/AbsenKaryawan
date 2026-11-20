@@ -357,7 +357,7 @@ tab1, tab2 = st.tabs([
 # TAB 1: UPLOAD MULTI-FILE & MULTI-TAB -> SIMPAN KE GSHEET & DOWNLOAD SHEET1
 # ------------------------------------------------------------------------------
 with tab1:
-    st.subheader("Olah & Gabung Data Mentah Mesin Absen (.xls / .xlsx)")
+    st.subheader("Upload & Rekap Log Absensi Karyawan (.xls / .xlsx)")
     st.caption("Mendukung penggabungan otomatis dari beberapa file sekaligus maupun beberapa tab (seperti tab Organik & PKWT).")
 
     col_up, col_hk = st.columns([3, 1])

@@ -42,9 +42,15 @@ def get_gsheet_client():
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
-    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
+    if "gcp_service_account" in st.secrets:
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"], scopes=scopes
+        )
+    else:
+        creds = Credentials.from_service_account_file(
+            "credentials.json", scopes=scopes
+        )
     return gspread.authorize(creds)
-
 
 def simpan_ke_gsheet(gsheet_url, nama_tab, df_rekap):
     """Membuat tab baru (atau menimpa jika sudah ada) di Google Sheets dengan format Sheet1"""

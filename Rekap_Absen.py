@@ -349,7 +349,7 @@ with st.sidebar:
 # ANTARMUKA UTAMA (2 TAB)
 # ==============================================================================
 tab1, tab2 = st.tabs([
-    "📤 Upload Data Mentah -> Auto Google Sheets & Excel",
+    "📤 Upload Data Absen dari Simponik -> Google Sheets",
     "🔍 Cari Rekap Per NIP / Nama (Database Online)"
 ])
 
@@ -363,7 +363,7 @@ with tab1:
     col_up, col_hk = st.columns([3, 1])
     with col_up:
         uploaded_files = st.file_uploader(
-            "Pilih 1 atau beberapa file mentah absensi:",
+            "Upload File Absensi:",
             type=["xls", "xlsx"],
             accept_multiple_files=True
         )
@@ -474,11 +474,11 @@ with tab1:
 # TAB 2: PENCARIAN PER NIP / NAMA DARI SELURUH TAB DI GOOGLE SHEETS MASTER
 # ------------------------------------------------------------------------------
 with tab2:
-    st.subheader("Cari Riwayat Absensi Pegawai Lintas Bulan (Google Sheets)")
+    st.subheader("Cari Riwayat Absensi Pegawai")
 
     keyword_online = st.text_input(
         "Masukkan NIP atau Nama Pegawai:",
-        placeholder="Contoh: 9422011HPL atau ABDULLOH",
+        placeholder="Contoh: 9422011HPL atau IQBAL",
         key="keyword_tab2"
     )
 

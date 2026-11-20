@@ -9,7 +9,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Sistem Rekap & Database Absensi", layout="wide")
-st.title("📊 Sistem Rekap & Database Absensi Online")
+st.title("📝 Sistem Rekap & Database Absensi Online")
 
 # ==============================================================================
 # KONFIGURASI GOOGLE SHEETS MASTER DATABASE

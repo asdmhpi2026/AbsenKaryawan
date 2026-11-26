@@ -540,24 +540,6 @@ with tab1:
                                 )
                                 st.success(f"Mantap! Data masuk ke tab **{nama_tab_tujuan}** di **{judul_gsheet}** (Total sekarang: **{total_baris} pegawai**).")
 
-                # Tampilkan preview di layar
-                df_preview = df_tampil.copy()
-                df_preview["Presentase Kehadiran"] = (df_preview["Presentase Kehadiran"] * 100).round(2).astype(str) + "%"
-                df_preview["Presentase Jam Kerja"] = (df_preview["Presentase Jam Kerja"] * 100).round(2).astype(str) + "%"
-                st.dataframe(df_preview, use_container_width=True, hide_index=True)
-
-                # Dua tombol aksi berdampingan: Simpan Otomatis ke Google Sheets & Download Excel Sheet1
-                col_btn1, col_btn2 = st.columns(2)
-
-                with col_btn1:
-                    if st.button(f"☁️ Simpan Otomatis ke Google Sheets (Tab: {nama_tab_tujuan})", type="primary", use_container_width=True):
-                        if not gsheet_url.strip():
-                            st.error("Tempelkan Link Google Sheets Master di panel sebelah kiri terlebih dahulu.")
-                        else:
-                            with st.spinner(f"Menyimpan data ke tab '{nama_tab_tujuan}' di Google Sheets..."):
-                                judul_gsheet = simpan_ke_gsheet(gsheet_url.strip(), nama_tab_tujuan.strip(), df_tampil)
-                                st.success(f"Mantap! Data **{nama_tab_tujuan}** ({len(df_tampil)} pegawai) berhasil masuk ke Google Sheets **{judul_gsheet}**!")
-
                 with col_btn2:
                     file_sheet1_bytes = export_format_sheet1(df_tampil)
                     nama_unduh = f"Rekap_{nama_tab_tujuan.strip().replace(' ', '_')}.xlsx"

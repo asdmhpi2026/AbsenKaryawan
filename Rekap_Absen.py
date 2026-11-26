@@ -405,7 +405,7 @@ with st.sidebar:
         help="Satu file Google Sheets ini akan menyimpan seluruh rekap bulanan (tiap bulan = 1 tab)."
     )
     if "gcp_service_account" in st.secrets:
-        st.success("✅ Streamlit Secrets (gcp_service_account) aktif")
+        st.success("✅ Streamlit Secrets Aktif")
     elif os.path.exists(CREDENTIALS_FILE):
         st.success("✅ credentials.json terdeteksi")
     else:

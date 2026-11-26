@@ -404,10 +404,12 @@ with st.sidebar:
         placeholder="https://docs.google.com/spreadsheets/d/xxxx/edit",
         help="Satu file Google Sheets ini akan menyimpan seluruh rekap bulanan (tiap bulan = 1 tab)."
     )
-    if os.path.exists(CREDENTIALS_FILE):
+    if "gcp_service_account" in st.secrets:
+        st.success("✅ Streamlit Secrets (gcp_service_account) aktif")
+    elif os.path.exists(CREDENTIALS_FILE):
         st.success("✅ credentials.json terdeteksi")
     else:
-        st.warning("⚠️ credentials.json belum ada di folder")
+        st.warning("⚠️ Secrets / credentials.json belum terkonfigurasi")
 
 # ==============================================================================
 # ANTARMUKA UTAMA (2 TAB)

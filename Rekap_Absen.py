@@ -9,7 +9,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Sistem Rekap & Database Absensi", layout="wide")
-st.title("📝 Sistem Rekap & Database Absensi Online")
+st.title("📊 Sistem Rekap & Database Absensi Online")
 
 # ==============================================================================
 # KONFIGURASI GOOGLE SHEETS MASTER DATABASE
@@ -52,43 +52,80 @@ def get_gsheet_client():
         )
     return gspread.authorize(creds)
 
-def simpan_ke_gsheet(gsheet_url, nama_tab, df_rekap):
-    """Membuat tab baru (atau menimpa jika sudah ada) di Google Sheets dengan format Sheet1"""
+
+def simpan_ke_gsheet(gsheet_url, nama_tab, df_rekap, mode_simpan="Timpa Semua (Gelondongan)"):
+    """Menyimpan data ke Google Sheets: bisa timpa seluruh tab atau tambah/update per pegawai"""
     gc = get_gsheet_client()
     sh = gc.open_by_url(gsheet_url)
 
-    # Cek apakah tab bulan tersebut sudah ada
+    header = [
+        "No", "NIP", "Nama", "Total Masuk", "Efeketif Kerja",
+        "Terlambat (Menit)", "Presentase Kehadiran", "Presentase Jam Kerja"
+    ]
+
     existing_titles = [ws.title for ws in sh.worksheets()]
     if nama_tab in existing_titles:
         ws = sh.worksheet(nama_tab)
+        if mode_simpan == "Tambah / Update Per Nama (Sisipan)":
+            existing_vals = ws.get_all_values()
+            if len(existing_vals) > 1:
+                old_hdr = existing_vals[0]
+                df_old = pd.DataFrame(existing_vals[1:], columns=old_hdr)
+                # Pastikan kolom standar tersedia meski dari tab format lama (6 kolom)
+                for col_name, default_val in [
+                    ("Terlambat (Menit)", 0),
+                    ("Presentase Kehadiran", 0.0),
+                    ("Presentase Jam Kerja", 1.0),
+                ]:
+                    if col_name not in df_old.columns:
+                        if col_name == "Presentase Kehadiran" and "Presentase" in df_old.columns:
+                            df_old[col_name] = df_old["Presentase"]
+                        else:
+                            df_old[col_name] = default_val
+
+                df_old["NIP"] = df_old["NIP"].astype(str).str.strip()
+                new_nips = set(df_rekap["NIP"].astype(str).str.strip())
+                # Pertahankan pegawai lama yang tidak ada di file sisipan, lalu gabung data baru
+                df_old_keep = df_old[~df_old["NIP"].isin(new_nips)][header[1:]]
+                df_new_part = df_rekap[header[1:]].copy()
+                df_gabung_gs = pd.concat([df_old_keep, df_new_part], ignore_index=True)
+            else:
+                df_gabung_gs = df_rekap[header[1:]].copy()
+        else:
+            df_gabung_gs = df_rekap[header[1:]].copy()
         ws.clear()
     else:
         ws = sh.add_worksheet(title=nama_tab, rows=str(len(df_rekap) + 20), cols="10")
+        df_gabung_gs = df_rekap[header[1:]].copy()
 
-    # Siapkan data persis format Sheet1 (Presentase disimpan sebagai angka desimal / string persen)
-    header = ["No", "NIP", "Nama", "Total Masuk", "Efeketif Kerja", "Presentase"]
     rows_to_write = [header]
-    for idx, r in df_rekap.reset_index(drop=True).iterrows():
+    for idx, r in df_gabung_gs.reset_index(drop=True).iterrows():
+        def _clean_pct(val):
+            s = str(val).replace("%", "").strip()
+            v = float(s) if s else 0.0
+            return round(v if v <= 1.0 else v / 100.0, 6)
+
         rows_to_write.append([
             int(idx + 1),
-            str(r["NIP"]),
-            str(r["Nama"]),
-            int(r["Total Masuk"]),
-            int(r["Efeketif Kerja"]),
-            round(float(r["Presentase"]), 6),
+            str(r["NIP"]).strip(),
+            str(r["Nama"]).strip(),
+            int(float(r["Total Masuk"])),
+            int(float(r["Efeketif Kerja"])),
+            int(round(float(r["Terlambat (Menit)"]))),
+            _clean_pct(r["Presentase Kehadiran"]),
+            _clean_pct(r["Presentase Jam Kerja"]),
         ])
 
     ws.update(range_name="A1", values=rows_to_write, value_input_option="USER_ENTERED")
 
-    # Format kolom F (Presentase) menjadi format persen (0%) di Google Sheets
-    ws.format("F2:F" + str(len(rows_to_write)), {
-        "numberFormat": {"type": "PERCENT", "pattern": "0%"}
+    ws.format("G2:H" + str(len(rows_to_write)), {
+        "numberFormat": {"type": "PERCENT", "pattern": "0.00%"}
     })
-    ws.format("A1:F1", {
+    ws.format("A1:H1", {
         "textFormat": {"bold": True},
         "horizontalAlignment": "CENTER"
     })
-    return sh.title
+    return sh.title, len(rows_to_write) - 1
 
 
 # ==============================================================================
@@ -104,12 +141,11 @@ def deteksi_periode_otomatis(df_gabungan, fallback_name=""):
     return fallback_name
 
 
-def proses_data_mentah(df_raw, efektif_kerja=22):
+def proses_data_mentah(df_raw, efektif_kerja=22, filter_periode=None):
     """
     Mengolah gabungan log mentah absensi menjadi rekap per NIP:
-    1. Tanggal kembar dengan scan lengkap -> dihitung 1 (duplikatnya 0)
-    2. Tanggal tunggal hanya Scan Masuk (Scan Keluar '-') -> dihitung 1
-    3. Tanggal kembar yang semuanya tanpa Scan Keluar -> dihitung 0
+    - Menghitung Total Masuk, Total Keterlambatan (Menit),
+      Presentase Kehadiran, dan Presentase Jam Kerja: ((HK*480) - Telat) / (HK*480).
     """
     df = df_raw.copy()
     df.columns = [str(c).strip() for c in df.columns]
@@ -121,9 +157,12 @@ def proses_data_mentah(df_raw, efektif_kerja=22):
 
     df["NIP"] = df["No Induk"].astype(str).str.strip()
     df["Nama"] = df["Nama"].astype(str).str.strip()
-    df["Tgl"] = pd.to_datetime(df["Tanggal Masuk"], errors="coerce").dt.strftime("%Y-%m-%d")
+    dt_series = pd.to_datetime(df["Tanggal Masuk"], errors="coerce")
+    df["Tgl"] = dt_series.dt.strftime("%Y-%m-%d")
+    df["Periode_Str"] = dt_series.apply(
+        lambda d: f"{BULAN_ID[d.month]} {d.year}" if pd.notna(d) else ""
+    )
 
-    # Buang baris kosong / header berulang jika ada
     df = df[
         df["NIP"].notna()
         & (df["NIP"] != "")
@@ -132,38 +171,60 @@ def proses_data_mentah(df_raw, efektif_kerja=22):
         & df["Tgl"].notna()
     ].copy()
 
+    # Jika file per-nama berisi banyak bulan (seperti export riwayat 1 orang), filter sesuai periode target
+    if filter_periode and filter_periode.strip() in df["Periode_Str"].unique():
+        df = df[df["Periode_Str"] == filter_periode.strip()].copy()
+
     sm_str = df["Scan Masuk"].astype(str).str.strip()
     sk_str = df["Scan Keluar"].astype(str).str.strip()
 
     df["sm_ok"] = (sm_str != "-") & (sm_str != "") & (sm_str.str.lower() != "nan")
     df["sk_ok"] = (sk_str != "-") & (sk_str != "") & (sk_str.str.lower() != "nan")
 
-    # Hitung berapa kali (NIP, Tgl) muncul dalam data mentah gabungan
     tgl_count = df.groupby(["NIP", "Tgl"])["sm_ok"].transform("count")
-
-    # Aturan 1: Scan Masuk & Keluar terisi -> ambil kemunculan pertama per (NIP, Tgl)
     lengkap = df["sm_ok"] & df["sk_ok"]
     first_lengkap = lengkap & (~df[lengkap].duplicated(subset=["NIP", "Tgl"])).reindex(df.index, fill_value=False)
-
-    # Aturan 2: Hanya Scan Masuk terisi (Scan Keluar '-') DAN tanggal tunggal (tidak kembar)
     lupa_tunggal = df["sm_ok"] & (~df["sk_ok"]) & (tgl_count == 1)
 
     df["Hitung_Hadir"] = (first_lengkap | lupa_tunggal).astype(int)
 
-    # Kelompokkan berdasarkan NIP (ambil Nama pertama agar konsisten jika ada perbedaan spasi)
+    # Ambil kolom Keterlambatan (Menit) jika tersedia di file mentah
+    if "Keterlambatan (Menit)" in df.columns:
+        telat_num = pd.to_numeric(df["Keterlambatan (Menit)"], errors="coerce").fillna(0)
+        # Hitung menit telat hanya pada baris kehadiran yang sah agar tidak double count
+        df["Telat_Valid"] = telat_num.where(df["Hitung_Hadir"] == 1, 0)
+    else:
+        df["Telat_Valid"] = 0
+
     rekap = (
         df.groupby("NIP", as_index=False, sort=False)
-        .agg(Nama=("Nama", "first"), Total_Masuk=("Hitung_Hadir", "sum"))
-        .rename(columns={"Total_Masuk": "Total Masuk"})
+        .agg(
+            Nama=("Nama", "first"),
+            Total_Masuk=("Hitung_Hadir", "sum"),
+            Telat_Menit=("Telat_Valid", "sum"),
+        )
+        .rename(columns={
+            "Total_Masuk": "Total Masuk",
+            "Telat_Menit": "Terlambat (Menit)",
+        })
     )
     rekap.insert(0, "No", range(1, len(rekap) + 1))
     rekap["Efeketif Kerja"] = int(efektif_kerja)
-    rekap["Presentase"] = rekap["Total Masuk"] / float(efektif_kerja) if efektif_kerja > 0 else 0.0
+    rekap["Terlambat (Menit)"] = rekap["Terlambat (Menit)"].round(0).astype(int)
+
+    total_menit_bulan = float(efektif_kerja) * 480.0
+    rekap["Presentase Kehadiran"] = (
+        rekap["Total Masuk"] / float(efektif_kerja) if efektif_kerja > 0 else 0.0
+    )
+    rekap["Presentase Jam Kerja"] = (
+        ((total_menit_bulan - rekap["Terlambat (Menit)"]) / total_menit_bulan).clip(lower=0.0)
+        if total_menit_bulan > 0 else 0.0
+    )
     return rekap
 
 
 def export_format_sheet1(df_rekap):
-    """Mengekspor hasil rekap ke Excel persis seperti format Sheet1"""
+    """Mengekspor hasil rekap ke Excel lengkap dengan rumus Presentase Jam Kerja"""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Sheet1"
@@ -172,7 +233,10 @@ def export_format_sheet1(df_rekap):
     align_center = Alignment(horizontal="center", vertical="center")
     align_left = Alignment(horizontal="left", vertical="center")
 
-    headers = ["No", "NIP", "Nama", "Total Masuk", "Efeketif Kerja", "Presentase"]
+    headers = [
+        "No", "NIP", "Nama", "Total Masuk", "Efeketif Kerja",
+        "Terlambat (Menit)", "Presentase Kehadiran", "Presentase Jam Kerja"
+    ]
     for col_idx, h in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col_idx, value=h)
         cell.font = font_default
@@ -186,26 +250,26 @@ def export_format_sheet1(df_rekap):
             str(row["Nama"]),
             int(row["Total Masuk"]),
             int(row["Efeketif Kerja"]),
-            float(row["Presentase"]),
+            int(row["Terlambat (Menit)"]),
+            f"=D{excel_row}/E{excel_row}",
+            f"=((E{excel_row}*480)-F{excel_row})/(E{excel_row}*480)",
         ]
         for c_idx, val in enumerate(vals, 1):
             cell = ws.cell(row=excel_row, column=c_idx, value=val)
             cell.font = font_default
             if c_idx == 3:
                 cell.alignment = align_left
-            elif c_idx == 6:
-                cell.number_format = "0%"
+            elif c_idx in (7, 8):
+                cell.number_format = "0.00%"
 
-    lebar_kolom = {1: 6, 2: 16, 3: 38, 4: 14, 5: 15, 6: 13}
+    lebar_kolom = {1: 6, 2: 16, 3: 36, 4: 14, 5: 15, 6: 18, 7: 21, 8: 22}
     for col_idx, width in lebar_kolom.items():
-        col_letter = openpyxl.utils.get_column_letter(col_idx)
-        ws.column_dimensions[col_letter].width = width
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = width
 
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
     return output
-
 
 # ==============================================================================
 # PENCARIAN RIWAYAT DARI GOOGLE SHEETS ONLINE
@@ -258,12 +322,15 @@ def format_excel_custom(df):
     align_left = Alignment(horizontal="left", vertical="center")
     align_right = Alignment(horizontal="right", vertical="center")
 
-    ws.merge_cells("C2:G2")
+    ws.merge_cells("C2:I2")
     ws["C2"] = "REKAP ABSENSI PEGAWAI"
     ws["C2"].font = font_title
     ws["C2"].alignment = align_center
 
-    headers = ["NO", "NIP", "Nama", "Bulan", "Hadir", "Total Hari", "Persentase"]
+    headers = [
+        "NO", "NIP", "Nama", "Bulan", "Hadir", "Total Hari",
+        "Terlambat (Menit)", "Persentase Kehadiran", "Persentase Jam Kerja"
+    ]
     start_row = 5
 
     for col_num, header_title in enumerate(headers, 1):
@@ -273,6 +340,13 @@ def format_excel_custom(df):
         cell.border = thin_border
         cell.alignment = align_center
 
+    def _to_pct(raw_val):
+        try:
+            v = float(str(raw_val).replace("%", "").strip())
+            return v if v <= 1.0 else v / 100.0
+        except Exception:
+            return 0.0
+
     for row_idx, row_data in df.reset_index(drop=True).iterrows():
         current_row = start_row + 1 + row_idx
         no_val = row_idx + 1
@@ -280,25 +354,16 @@ def format_excel_custom(df):
         nama_val = str(row_data["Nama"])
         bulan_val = str(row_data["Bulan"])
 
-        try:
-            hadir_val = float(row_data["Hadir"]) if pd.notna(row_data["Hadir"]) else 0
-        except Exception:
-            hadir_val = row_data["Hadir"]
+        hadir_val = float(row_data["Hadir"]) if pd.notna(row_data["Hadir"]) else 0
+        total_val = float(row_data["Total Hari"]) if pd.notna(row_data["Total Hari"]) else 0
+        telat_val = float(row_data.get("Terlambat (Menit)", 0)) if pd.notna(row_data.get("Terlambat (Menit)", 0)) else 0
+        persen_hadir = _to_pct(row_data.get("Persentase Kehadiran", row_data.get("Persentase", 0)))
+        formula_jam = f"=((F{current_row}*480)-G{current_row})/(F{current_row}*480)"
 
-        try:
-            total_val = float(row_data["Total Hari"]) if pd.notna(row_data["Total Hari"]) else 0
-        except Exception:
-            total_val = row_data["Total Hari"]
-
-        persen_val = 0
-        try:
-            raw_p = str(row_data["Persentase"]).replace("%", "").strip()
-            v = float(raw_p)
-            persen_val = v if v <= 1.0 else v / 100.0
-        except Exception:
-            persen_val = 0
-
-        row_values = [no_val, nip_val, nama_val, bulan_val, hadir_val, total_val, persen_val]
+        row_values = [
+            no_val, nip_val, nama_val, bulan_val, hadir_val,
+            total_val, telat_val, persen_hadir, formula_jam
+        ]
         for col_idx, val in enumerate(row_values, 1):
             cell = ws.cell(row=current_row, column=col_idx, value=val)
             cell.font = font_body
@@ -307,13 +372,12 @@ def format_excel_custom(df):
                 cell.alignment = align_center
             elif col_idx in [2, 3]:
                 cell.alignment = align_left if col_idx == 3 else align_center
-            elif col_idx in [5, 6]:
+            elif col_idx in [5, 6, 7]:
                 cell.alignment = align_center
-                if isinstance(val, (int, float)):
-                    cell.number_format = "#,##0"
-            elif col_idx == 7:
+                cell.number_format = "#,##0"
+            elif col_idx in [8, 9]:
                 cell.alignment = align_right
-                cell.number_format = "0.0%" if persen_val == 1.0 or persen_val == 0 else "0.00%"
+                cell.number_format = "0.00%"
 
     for col in ws.columns:
         max_len = 0
@@ -340,8 +404,8 @@ with st.sidebar:
         placeholder="https://docs.google.com/spreadsheets/d/xxxx/edit",
         help="Satu file Google Sheets ini akan menyimpan seluruh rekap bulanan (tiap bulan = 1 tab)."
     )
-    if ("gcp_service_account" in st.secrets) or os.path.exists(CREDENTIALS_FILE):
-        st.success("✅ Kredensial Google Sheets siap")
+    if os.path.exists(CREDENTIALS_FILE):
+        st.success("✅ credentials.json terdeteksi")
     else:
         st.warning("⚠️ credentials.json belum ada di folder")
 
@@ -349,7 +413,7 @@ with st.sidebar:
 # ANTARMUKA UTAMA (2 TAB)
 # ==============================================================================
 tab1, tab2 = st.tabs([
-    "📤 Upload Data Absen dari Simponik -> Google Sheets",
+    "📤 Upload Data Mentah -> Auto Google Sheets & Excel",
     "🔍 Cari Rekap Per NIP / Nama (Database Online)"
 ])
 
@@ -357,13 +421,13 @@ tab1, tab2 = st.tabs([
 # TAB 1: UPLOAD MULTI-FILE & MULTI-TAB -> SIMPAN KE GSHEET & DOWNLOAD SHEET1
 # ------------------------------------------------------------------------------
 with tab1:
-    st.subheader("Upload & Rekap Log Absensi Karyawan (.xls / .xlsx)")
+    st.subheader("Olah & Gabung Data Mentah Mesin Absen (.xls / .xlsx)")
     st.caption("Mendukung penggabungan otomatis dari beberapa file sekaligus maupun beberapa tab (seperti tab Organik & PKWT).")
 
     col_up, col_hk = st.columns([3, 1])
     with col_up:
         uploaded_files = st.file_uploader(
-            "Upload File Absensi:",
+            "Pilih 1 atau beberapa file mentah absensi:",
             type=["xls", "xlsx"],
             accept_multiple_files=True
         )
@@ -422,7 +486,11 @@ with tab1:
                         key="filter_tab1"
                     )
 
-                df_rekap_full = proses_data_mentah(df_gabungan, efektif_kerja=efektif_kerja)
+                df_rekap_full = proses_data_mentah(
+                    df_gabungan,
+                    efektif_kerja=efektif_kerja,
+                    filter_periode=nama_tab_tujuan
+                )
 
                 if filter_mentah.strip():
                     kw = filter_mentah.strip().upper()
@@ -438,6 +506,37 @@ with tab1:
                     f"Berhasil menggabungkan **{len(pilihan_user)} tab** ({len(df_gabungan):,} baris log) "
                     f"menjadi **{len(df_tampil)} pegawai** untuk periode **{nama_tab_tujuan}**."
                 )
+
+                # Tampilkan preview di layar
+                df_preview = df_tampil.copy()
+                df_preview["Presentase Kehadiran"] = (df_preview["Presentase Kehadiran"] * 100).round(2).astype(str) + "%"
+                df_preview["Presentase Jam Kerja"] = (df_preview["Presentase Jam Kerja"] * 100).round(2).astype(str) + "%"
+                st.dataframe(df_preview, use_container_width=True, hide_index=True)
+
+                # Pilih mode simpan: Gelondongan (Timpa) atau Per-Nama (Sisipkan/Update ke tab yang sudah ada)
+                default_mode_idx = 1 if len(df_tampil) <= 5 else 0
+                mode_simpan_gsheet = st.radio(
+                    "Mode Simpan ke Google Sheets:",
+                    ["Timpa Semua (Gelondongan)", "Tambah / Update Per Nama (Sisipan)"],
+                    index=default_mode_idx,
+                    horizontal=True,
+                    help="Pilih 'Tambah / Update Per Nama' jika mengunggah susulan pegawai yang hilang tanpa menghapus data pegawai lain di bulan tersebut."
+                )
+
+                col_btn1, col_btn2 = st.columns(2)
+                with col_btn1:
+                    if st.button(f"☁️ Simpan ke Google Sheets (Tab: {nama_tab_tujuan})", type="primary", use_container_width=True):
+                        if not gsheet_url.strip():
+                            st.error("Tempelkan Link Google Sheets Master di panel sebelah kiri terlebih dahulu.")
+                        else:
+                            with st.spinner(f"Menyimpan data ke tab '{nama_tab_tujuan}' di Google Sheets..."):
+                                judul_gsheet, total_baris = simpan_ke_gsheet(
+                                    gsheet_url.strip(),
+                                    nama_tab_tujuan.strip(),
+                                    df_tampil,
+                                    mode_simpan=mode_simpan_gsheet
+                                )
+                                st.success(f"Mantap! Data masuk ke tab **{nama_tab_tujuan}** di **{judul_gsheet}** (Total sekarang: **{total_baris} pegawai**).")
 
                 # Tampilkan preview di layar
                 df_preview = df_tampil.copy()
@@ -474,11 +573,11 @@ with tab1:
 # TAB 2: PENCARIAN PER NIP / NAMA DARI SELURUH TAB DI GOOGLE SHEETS MASTER
 # ------------------------------------------------------------------------------
 with tab2:
-    st.subheader("Cari Riwayat Absensi Pegawai")
+    st.subheader("Cari Riwayat Absensi Pegawai Lintas Bulan (Google Sheets)")
 
     keyword_online = st.text_input(
         "Masukkan NIP atau Nama Pegawai:",
-        placeholder="Contoh: 9422011HPL atau IQBAL",
+        placeholder="Contoh: 9422011HPL atau ABDULLOH",
         key="keyword_tab2"
     )
 
@@ -507,12 +606,19 @@ with tab2:
                             col2 = str(row[2]).strip() if len(row) > 2 else ""
 
                             # Mendukung format Sheet1 6 kolom (No, NIP, Nama, Total Masuk, Efektif Kerja, Presentase)
-                            if col0.isdigit() and len(row) >= 6:
+                            # Format baru 8 kolom: No, NIP, Nama, Total Masuk, Efektif Kerja, Terlambat, % Kehadiran, % Jam Kerja
+                            if col0.isdigit() and len(row) >= 8:
                                 nip_val, nama_val = col1, col2
-                                hadir_val, total_val, persen_val = row[3], row[4], row[5]
+                                hadir_val, total_val = row[3], row[4]
+                                telat_val, persen_hadir, persen_jam = row[5], row[6], row[7]
+                            elif col0.isdigit() and len(row) >= 6:
+                                nip_val, nama_val = col1, col2
+                                hadir_val, total_val = row[3], row[4]
+                                telat_val, persen_hadir, persen_jam = "0", row[5], row[5]
                             else:
                                 nip_val, nama_val = col0, col1
-                                hadir_val, total_val, persen_val = row[2], row[3], row[4]
+                                hadir_val, total_val = row[2], row[3]
+                                telat_val, persen_hadir, persen_jam = "0", row[4], row[4]
 
                             if keyword_clean in nip_val.upper() or keyword_clean in nama_val.upper():
                                 tampilan_b, thn_val, bln_val = ekstrak_periode_sort(ws.title)
@@ -522,7 +628,9 @@ with tab2:
                                     "Bulan": tampilan_b,
                                     "Hadir": hadir_val,
                                     "Total Hari": total_val,
-                                    "Persentase": persen_val,
+                                    "Terlambat (Menit)": telat_val,
+                                    "Persentase Kehadiran": persen_hadir,
+                                    "Persentase Jam Kerja": persen_jam,
                                     "_sort_tahun": thn_val,
                                     "_sort_bulan": bln_val,
                                 })

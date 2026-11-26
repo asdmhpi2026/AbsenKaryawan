@@ -620,9 +620,22 @@ with tab2:
                 hasil_pencarian = []
                 keyword_clean = keyword_online.strip().upper()
 
+                def _bersih_angka_int(val):
+                    s = str(val).strip()
+                    if not s or s == "-":
+                        return 0
+                    if "%" in s:
+                        return int(round(float(s.replace("%", "").strip()) / 100.0))
+                    return int(round(float(s)))
+
                 with st.spinner(f"Memindai {len(semua_tab)} tab bulan di '{sh.title}'..."):
                     for ws in semua_tab:
                         records = ws.get_all_values()
+                        if len(records) < 2:
+                            continue
+                        hdr_lower = [str(h).strip().lower() for h in records[0]]
+                        has_tdk_pulang_col = any("tidak absen pulang" in h for h in hdr_lower)
+
                         for row in records[1:]:
                             if len(row) < 5:
                                 continue
@@ -630,45 +643,45 @@ with tab2:
                             col1 = str(row[1]).strip()
                             col2 = str(row[2]).strip() if len(row) > 2 else ""
 
-                            # Format baru 9 kolom
-                            if col0.isdigit() and len(row) >= 9:
+                            # Deteksi struktur kolom berdasarkan header Google Sheets agar tab lama (8 kolom) tidak geser
+                            if col0.isdigit() and has_tdk_pulang_col and len(row) >= 9:
                                 nip_val, nama_val = col1, col2
-                                hadir_val, total_val = row[3], row[4]
-                                telat_val, tdk_pulang_val = row[5], row[6]
-                                persen_hadir, persen_jam = row[7], row[8]
-                            # Format 8 kolom
+                                hadir_raw, total_raw = row[3], row[4]
+                                telat_raw, tdk_pulang_raw = row[5], row[6]
                             elif col0.isdigit() and len(row) >= 8:
                                 nip_val, nama_val = col1, col2
-                                hadir_val, total_val = row[3], row[4]
-                                telat_val, tdk_pulang_val = row[5], "0"
-                                persen_hadir, persen_jam = row[6], row[7]
-                            # Format lama 6 kolom
+                                hadir_raw, total_raw = row[3], row[4]
+                                telat_raw, tdk_pulang_raw = row[5], "0"
                             elif col0.isdigit() and len(row) >= 6:
                                 nip_val, nama_val = col1, col2
-                                hadir_val, total_val = row[3], row[4]
-                                telat_val, tdk_pulang_val = "0", "0"
-                                persen_hadir, persen_jam = row[5], row[5]
+                                hadir_raw, total_raw = row[3], row[4]
+                                telat_raw, tdk_pulang_raw = "0", "0"
                             else:
                                 nip_val, nama_val = col0, col1
-                                hadir_val, total_val = row[2], row[3]
-                                telat_val, tdk_pulang_val = "0", "0"
-                                persen_hadir, persen_jam = row[4], row[4]
-
-                            if "%" in str(telat_val):
-                                telat_val = str(int(round(float(str(telat_val).replace("%", "").strip()) / 100)))
+                                hadir_raw, total_raw = row[2], row[3]
+                                telat_raw, tdk_pulang_raw = "0", "0"
 
                             if keyword_clean in nip_val.upper() or keyword_clean in nama_val.upper():
+                                hadir_int = _bersih_angka_int(hadir_raw)
+                                total_int = _bersih_angka_int(total_raw)
+                                telat_int = _bersih_angka_int(telat_raw)
+                                tdk_pulang_int = _bersih_angka_int(tdk_pulang_raw)
+
+                                pct_hadir = (hadir_int / total_int * 100.0) if total_int > 0 else 0.0
+                                total_menit = total_int * 480.0
+                                pct_jam = max(0.0, ((total_menit - telat_int) / total_menit * 100.0)) if total_menit > 0 else 0.0
+
                                 tampilan_b, thn_val, bln_val = ekstrak_periode_sort(ws.title)
                                 hasil_pencarian.append({
                                     "NIP": nip_val,
                                     "Nama": nama_val,
                                     "Bulan": tampilan_b,
-                                    "Total Masuk": hadir_val,
-                                    "Efektif Hari Kerja": total_val,
-                                    "Terlambat (Menit)": telat_val,
-                                    "Total Tidak Absen Pulang": tdk_pulang_val,
-                                    "Presentase Kehadiran": persen_hadir,
-                                    "Presentase Jam Kerja": persen_jam,
+                                    "Total Masuk": hadir_int,
+                                    "Efektif Hari Kerja": total_int,
+                                    "Terlambat (Menit)": telat_int,
+                                    "Total Tidak Absen Pulang": tdk_pulang_int,
+                                    "Presentase Kehadiran": f"{pct_hadir:.2f}%",
+                                    "Presentase Jam Kerja": f"{pct_jam:.2f}%",
                                     "_sort_tahun": thn_val,
                                     "_sort_bulan": bln_val,
                                 })

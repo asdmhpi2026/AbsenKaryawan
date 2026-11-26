@@ -112,16 +112,17 @@ def simpan_ke_gsheet(gsheet_url, nama_tab, df_rekap, mode_simpan="Timpa Semua (G
             int(float(r["Total Masuk"])),
             int(float(r["Efeketif Kerja"])),
             int(round(float(r["Terlambat (Menit)"]))),
+            int(round(float(r.get("Total Tidak Absen Pulang", 0)))),
             _clean_pct(r["Presentase Kehadiran"]),
             _clean_pct(r["Presentase Jam Kerja"]),
         ])
 
     ws.update(range_name="A1", values=rows_to_write, value_input_option="USER_ENTERED")
 
-    ws.format("G2:H" + str(len(rows_to_write)), {
+    ws.format("H2:I" + str(len(rows_to_write)), {
         "numberFormat": {"type": "PERCENT", "pattern": "0.00%"}
     })
-    ws.format("A1:H1", {
+    ws.format("A1:I1", {
         "textFormat": {"bold": True},
         "horizontalAlignment": "CENTER"
     })
@@ -187,11 +188,12 @@ def proses_data_mentah(df_raw, efektif_kerja=22, filter_periode=None):
     lupa_tunggal = df["sm_ok"] & (~df["sk_ok"]) & (tgl_count == 1)
 
     df["Hitung_Hadir"] = (first_lengkap | lupa_tunggal).astype(int)
+    # Hitung tidak absen pulang pada hari hadir yang sah (Scan Keluar '-')
+    df["Tidak_Pulang"] = ((df["Hitung_Hadir"] == 1) & (~df["sk_ok"])).astype(int)
 
     # Ambil kolom Keterlambatan (Menit) jika tersedia di file mentah
     if "Keterlambatan (Menit)" in df.columns:
         telat_num = pd.to_numeric(df["Keterlambatan (Menit)"], errors="coerce").fillna(0)
-        # Hitung menit telat hanya pada baris kehadiran yang sah agar tidak double count
         df["Telat_Valid"] = telat_num.where(df["Hitung_Hadir"] == 1, 0)
     else:
         df["Telat_Valid"] = 0
@@ -202,15 +204,18 @@ def proses_data_mentah(df_raw, efektif_kerja=22, filter_periode=None):
             Nama=("Nama", "first"),
             Total_Masuk=("Hitung_Hadir", "sum"),
             Telat_Menit=("Telat_Valid", "sum"),
+            Tidak_Pulang=("Tidak_Pulang", "sum"),
         )
         .rename(columns={
             "Total_Masuk": "Total Masuk",
             "Telat_Menit": "Terlambat (Menit)",
+            "Tidak_Pulang": "Total Tidak Absen Pulang",
         })
     )
     rekap.insert(0, "No", range(1, len(rekap) + 1))
     rekap["Efeketif Kerja"] = int(efektif_kerja)
     rekap["Terlambat (Menit)"] = rekap["Terlambat (Menit)"].round(0).astype(int)
+    rekap["Total Tidak Absen Pulang"] = rekap["Total Tidak Absen Pulang"].astype(int)
 
     total_menit_bulan = float(efektif_kerja) * 480.0
     rekap["Presentase Kehadiran"] = (
@@ -235,7 +240,8 @@ def export_format_sheet1(df_rekap):
 
     headers = [
         "No", "NIP", "Nama", "Total Masuk", "Efeketif Kerja",
-        "Terlambat (Menit)", "Presentase Kehadiran", "Presentase Jam Kerja"
+        "Terlambat (Menit)", "Total Tidak Absen Pulang",
+        "Presentase Kehadiran", "Presentase Jam Kerja"
     ]
     for col_idx, h in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col_idx, value=h)
@@ -251,6 +257,7 @@ def export_format_sheet1(df_rekap):
             int(row["Total Masuk"]),
             int(row["Efeketif Kerja"]),
             int(row["Terlambat (Menit)"]),
+            int(row["Total Tidak Absen Pulang"]),
             f"=D{excel_row}/E{excel_row}",
             f"=((E{excel_row}*480)-F{excel_row})/(E{excel_row}*480)",
         ]
@@ -259,10 +266,10 @@ def export_format_sheet1(df_rekap):
             cell.font = font_default
             if c_idx == 3:
                 cell.alignment = align_left
-            elif c_idx in (7, 8):
+            elif c_idx in (8, 9):
                 cell.number_format = "0.00%"
 
-    lebar_kolom = {1: 6, 2: 16, 3: 36, 4: 14, 5: 15, 6: 18, 7: 21, 8: 22}
+    lebar_kolom = {1: 6, 2: 16, 3: 36, 4: 14, 5: 15, 6: 18, 7: 24, 8: 21, 9: 22}
     for col_idx, width in lebar_kolom.items():
         ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = width
 
@@ -322,14 +329,15 @@ def format_excel_custom(df):
     align_left = Alignment(horizontal="left", vertical="center")
     align_right = Alignment(horizontal="right", vertical="center")
 
-    ws.merge_cells("C2:I2")
+    ws.merge_cells("C2:J2")
     ws["C2"] = "REKAP ABSENSI PEGAWAI"
     ws["C2"].font = font_title
     ws["C2"].alignment = align_center
 
     headers = [
-        "NO", "NIP", "Nama", "Bulan", "Hadir", "Total Hari",
-        "Terlambat (Menit)", "Persentase Kehadiran", "Persentase Jam Kerja"
+        "NO", "NIP", "Nama", "Bulan", "Total Masuk", "Efektif Hari Kerja",
+        "Terlambat (Menit)", "Total Tidak Absen Pulang",
+        "Presentase Kehadiran", "Presentase Jam Kerja"
     ]
     start_row = 5
 
@@ -354,15 +362,18 @@ def format_excel_custom(df):
         nama_val = str(row_data["Nama"])
         bulan_val = str(row_data["Bulan"])
 
-        hadir_val = float(row_data["Hadir"]) if pd.notna(row_data["Hadir"]) else 0
-        total_val = float(row_data["Total Hari"]) if pd.notna(row_data["Total Hari"]) else 0
-        telat_val = float(row_data.get("Terlambat (Menit)", 0)) if pd.notna(row_data.get("Terlambat (Menit)", 0)) else 0
-        persen_hadir = _to_pct(row_data.get("Persentase Kehadiran", row_data.get("Persentase", 0)))
+        hadir_val = float(row_data.get("Total Masuk", row_data.get("Hadir", 0)))
+        total_val = float(row_data.get("Efektif Hari Kerja", row_data.get("Total Hari", 0)))
+        telat_val = float(row_data.get("Terlambat (Menit)", 0))
+        tdk_pulang_val = float(row_data.get("Total Tidak Absen Pulang", 0))
+
+        # Kolom E = Total Masuk, Kolom F = Efektif Hari Kerja, Kolom G = Terlambat (Menit)
+        formula_hadir = f"=E{current_row}/F{current_row}"
         formula_jam = f"=((F{current_row}*480)-G{current_row})/(F{current_row}*480)"
 
         row_values = [
             no_val, nip_val, nama_val, bulan_val, hadir_val,
-            total_val, telat_val, persen_hadir, formula_jam
+            total_val, telat_val, tdk_pulang_val, formula_hadir, formula_jam
         ]
         for col_idx, val in enumerate(row_values, 1):
             cell = ws.cell(row=current_row, column=col_idx, value=val)
@@ -372,10 +383,10 @@ def format_excel_custom(df):
                 cell.alignment = align_center
             elif col_idx in [2, 3]:
                 cell.alignment = align_left if col_idx == 3 else align_center
-            elif col_idx in [5, 6, 7]:
+            elif col_idx in [5, 6, 7, 8]:
                 cell.alignment = align_center
                 cell.number_format = "#,##0"
-            elif col_idx in [8, 9]:
+            elif col_idx in [9, 10]:
                 cell.alignment = align_right
                 cell.number_format = "0.00%"
 
@@ -592,18 +603,29 @@ with tab2:
 
                             # Mendukung format Sheet1 6 kolom (No, NIP, Nama, Total Masuk, Efektif Kerja, Presentase)
                             # Format baru 8 kolom: No, NIP, Nama, Total Masuk, Efektif Kerja, Terlambat, % Kehadiran, % Jam Kerja
-                            if col0.isdigit() and len(row) >= 8:
+                            # Format baru 9 kolom
+                            if col0.isdigit() and len(row) >= 9:
                                 nip_val, nama_val = col1, col2
                                 hadir_val, total_val = row[3], row[4]
-                                telat_val, persen_hadir, persen_jam = row[5], row[6], row[7]
+                                telat_val, tdk_pulang_val = row[5], row[6]
+                                persen_hadir, persen_jam = row[7], row[8]
+                            # Format 8 kolom
+                            elif col0.isdigit() and len(row) >= 8:
+                                nip_val, nama_val = col1, col2
+                                hadir_val, total_val = row[3], row[4]
+                                telat_val, tdk_pulang_val = row[5], "0"
+                                persen_hadir, persen_jam = row[6], row[7]
+                            # Format lama 6 kolom
                             elif col0.isdigit() and len(row) >= 6:
                                 nip_val, nama_val = col1, col2
                                 hadir_val, total_val = row[3], row[4]
-                                telat_val, persen_hadir, persen_jam = "0", row[5], row[5]
+                                telat_val, tdk_pulang_val = "0", "0"
+                                persen_hadir, persen_jam = row[5], row[5]
                             else:
                                 nip_val, nama_val = col0, col1
                                 hadir_val, total_val = row[2], row[3]
-                                telat_val, persen_hadir, persen_jam = "0", row[4], row[4]
+                                telat_val, tdk_pulang_val = "0", "0"
+                                persen_hadir, persen_jam = row[4], row[4]
 
                             if keyword_clean in nip_val.upper() or keyword_clean in nama_val.upper():
                                 tampilan_b, thn_val, bln_val = ekstrak_periode_sort(ws.title)
@@ -611,11 +633,12 @@ with tab2:
                                     "NIP": nip_val,
                                     "Nama": nama_val,
                                     "Bulan": tampilan_b,
-                                    "Hadir": hadir_val,
-                                    "Total Hari": total_val,
+                                    "Total Masuk": hadir_val,
+                                    "Efektif Hari Kerja": total_val,
                                     "Terlambat (Menit)": telat_val,
-                                    "Persentase Kehadiran": persen_hadir,
-                                    "Persentase Jam Kerja": persen_jam,
+                                    "Total Tidak Absen Pulang": tdk_pulang_val,
+                                    "Presentase Kehadiran": persen_hadir,
+                                    "Presentase Jam Kerja": persen_jam,
                                     "_sort_tahun": thn_val,
                                     "_sort_bulan": bln_val,
                                 })

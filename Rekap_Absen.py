@@ -542,7 +542,8 @@ with tab1:
 
                 # Tampilkan preview di layar
                 df_preview = df_tampil.copy()
-                df_preview["Presentase"] = (df_preview["Presentase"] * 100).round(0).astype(int).astype(str) + "%"
+                df_preview["Presentase Kehadiran"] = (df_preview["Presentase Kehadiran"] * 100).round(2).astype(str) + "%"
+                df_preview["Presentase Jam Kerja"] = (df_preview["Presentase Jam Kerja"] * 100).round(2).astype(str) + "%"
                 st.dataframe(df_preview, use_container_width=True, hide_index=True)
 
                 # Dua tombol aksi berdampingan: Simpan Otomatis ke Google Sheets & Download Excel Sheet1

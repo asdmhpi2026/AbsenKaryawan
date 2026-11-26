@@ -14,11 +14,7 @@ st.title("📊 Sistem Rekap & Database Absensi Online")
 # ==============================================================================
 # KONFIGURASI GOOGLE SHEETS MASTER DATABASE
 # ==============================================================================
-# 1. Simpan file JSON Service Account dari Google Cloud di folder yang sama dengan skrip ini
 CREDENTIALS_FILE = "credentials.json"
-
-# 2. Tempelkan URL Google Sheets Master Anda (cukup 1 file Google Sheets untuk semua bulan)
-#    Pastikan email client_email di dalam credentials.json sudah di-Share sebagai "Editor"
 DEFAULT_GSHEET_URL = "https://docs.google.com/spreadsheets/d/1zgvGZjd5hfV3fUqH9Ns9HQLLtttDzVJVvF8GTNWIwvI/edit?usp=sharing"
 
 BULAN_ID = {
@@ -48,9 +44,21 @@ def get_gsheet_client():
         )
     else:
         creds = Credentials.from_service_account_file(
-            "credentials.json", scopes=scopes
+            CREDENTIALS_FILE, scopes=scopes
         )
     return gspread.authorize(creds)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def ambil_daftar_tab_gsheet(gsheet_url):
+    if not gsheet_url.strip():
+        return []
+    try:
+        gc = get_gsheet_client()
+        sh = gc.open_by_url(gsheet_url.strip())
+        return [ws.title for ws in sh.worksheets()]
+    except Exception:
+        return []
 
 
 def simpan_ke_gsheet(gsheet_url, nama_tab, df_rekap, mode_simpan="Timpa Semua (Gelondongan)"):
@@ -60,7 +68,8 @@ def simpan_ke_gsheet(gsheet_url, nama_tab, df_rekap, mode_simpan="Timpa Semua (G
 
     header = [
         "No", "NIP", "Nama", "Total Masuk", "Efeketif Kerja",
-        "Terlambat (Menit)", "Presentase Kehadiran", "Presentase Jam Kerja"
+        "Terlambat (Menit)", "Total Tidak Absen Pulang",
+        "Presentase Kehadiran", "Presentase Jam Kerja"
     ]
 
     existing_titles = [ws.title for ws in sh.worksheets()]
@@ -71,9 +80,10 @@ def simpan_ke_gsheet(gsheet_url, nama_tab, df_rekap, mode_simpan="Timpa Semua (G
             if len(existing_vals) > 1:
                 old_hdr = existing_vals[0]
                 df_old = pd.DataFrame(existing_vals[1:], columns=old_hdr)
-                # Pastikan kolom standar tersedia meski dari tab format lama (6 kolom)
+                # Pastikan kolom standar tersedia meski dari tab format lama (6 atau 8 kolom)
                 for col_name, default_val in [
                     ("Terlambat (Menit)", 0),
+                    ("Total Tidak Absen Pulang", 0),
                     ("Presentase Kehadiran", 0.0),
                     ("Presentase Jam Kerja", 1.0),
                 ]:
@@ -83,9 +93,17 @@ def simpan_ke_gsheet(gsheet_url, nama_tab, df_rekap, mode_simpan="Timpa Semua (G
                         else:
                             df_old[col_name] = default_val
 
+                # Bersihkan jika ada nilai terformat % pada kolom angka bulat
+                for num_col in ["Total Masuk", "Efeketif Kerja", "Terlambat (Menit)", "Total Tidak Absen Pulang"]:
+                    def _clean_int(v):
+                        s = str(v).strip()
+                        if "%" in s:
+                            return int(round(float(s.replace("%", "").strip()) / 100.0))
+                        return int(round(float(s))) if s else 0
+                    df_old[num_col] = df_old[num_col].apply(_clean_int)
+
                 df_old["NIP"] = df_old["NIP"].astype(str).str.strip()
                 new_nips = set(df_rekap["NIP"].astype(str).str.strip())
-                # Pertahankan pegawai lama yang tidak ada di file sisipan, lalu gabung data baru
                 df_old_keep = df_old[~df_old["NIP"].isin(new_nips)][header[1:]]
                 df_new_part = df_rekap[header[1:]].copy()
                 df_gabung_gs = pd.concat([df_old_keep, df_new_part], ignore_index=True)
@@ -119,6 +137,9 @@ def simpan_ke_gsheet(gsheet_url, nama_tab, df_rekap, mode_simpan="Timpa Semua (G
 
     ws.update(range_name="A1", values=rows_to_write, value_input_option="USER_ENTERED")
 
+    ws.format("D2:G" + str(len(rows_to_write)), {
+        "numberFormat": {"type": "NUMBER", "pattern": "0"}
+    })
     ws.format("H2:I" + str(len(rows_to_write)), {
         "numberFormat": {"type": "PERCENT", "pattern": "0.00%"}
     })
@@ -145,7 +166,7 @@ def deteksi_periode_otomatis(df_gabungan, fallback_name=""):
 def proses_data_mentah(df_raw, efektif_kerja=22, filter_periode=None):
     """
     Mengolah gabungan log mentah absensi menjadi rekap per NIP:
-    - Menghitung Total Masuk, Total Keterlambatan (Menit),
+    - Menghitung Total Masuk, Terlambat (Menit), Total Tidak Absen Pulang,
       Presentase Kehadiran, dan Presentase Jam Kerja: ((HK*480) - Telat) / (HK*480).
     """
     df = df_raw.copy()
@@ -188,10 +209,8 @@ def proses_data_mentah(df_raw, efektif_kerja=22, filter_periode=None):
     lupa_tunggal = df["sm_ok"] & (~df["sk_ok"]) & (tgl_count == 1)
 
     df["Hitung_Hadir"] = (first_lengkap | lupa_tunggal).astype(int)
-    # Hitung tidak absen pulang pada hari hadir yang sah (Scan Keluar '-')
     df["Tidak_Pulang"] = ((df["Hitung_Hadir"] == 1) & (~df["sk_ok"])).astype(int)
 
-    # Ambil kolom Keterlambatan (Menit) jika tersedia di file mentah
     if "Keterlambatan (Menit)" in df.columns:
         telat_num = pd.to_numeric(df["Keterlambatan (Menit)"], errors="coerce").fillna(0)
         df["Telat_Valid"] = telat_num.where(df["Hitung_Hadir"] == 1, 0)
@@ -278,6 +297,7 @@ def export_format_sheet1(df_rekap):
     output.seek(0)
     return output
 
+
 # ==============================================================================
 # PENCARIAN RIWAYAT DARI GOOGLE SHEETS ONLINE
 # ==============================================================================
@@ -347,13 +367,6 @@ def format_excel_custom(df):
         cell.fill = fill_header
         cell.border = thin_border
         cell.alignment = align_center
-
-    def _to_pct(raw_val):
-        try:
-            v = float(str(raw_val).replace("%", "").strip())
-            return v if v <= 1.0 else v / 100.0
-        except Exception:
-            return 0.0
 
     for row_idx, row_data in df.reset_index(drop=True).iterrows():
         current_row = start_row + 1 + row_idx
@@ -451,16 +464,13 @@ with tab1:
         semua_opsi_sheet = []
         peta_excel = {}
 
-        # Baca daftar tab dari semua file yang diunggah
         for f in uploaded_files:
             xls_obj = pd.ExcelFile(f)
             peta_excel[f.name] = xls_obj
             for s_name in xls_obj.sheet_names:
-                # Abaikan tab rekap lama bernama "Sheet1" jika ada tab data mentah lain
                 label_opsi = f"{f.name}  |  Tab: {s_name}"
                 semua_opsi_sheet.append((label_opsi, f.name, s_name))
 
-        # Otomatis pilih semua tab mentah (kecuali 'Sheet1' jika masih ada tab lain)
         default_pilihan = [
             item[0] for item in semua_opsi_sheet
             if item[2].strip().lower() != "sheet1"
@@ -485,13 +495,41 @@ with tab1:
                 df_gabungan = pd.concat(kumpulan_df, ignore_index=True)
                 periode_terdeteksi = deteksi_periode_otomatis(df_gabungan, fallback_name="Rekap_Baru")
 
+                # 1. Pilih mode simpan terlebih dahulu (Gelondongan vs Sisipan Per-Nama)
+                mode_simpan_gsheet = st.radio(
+                    "Mode Simpan ke Google Sheets:",
+                    ["Timpa Semua (Gelondongan)", "Tambah / Update Per Nama (Sisipan)"],
+                    index=0,
+                    horizontal=True,
+                    help="Pilih 'Tambah / Update Per Nama' untuk menyisipkan data pegawai susulan ke tab bulan yang sudah ada tanpa salah ketik nama tab."
+                )
+
                 col_per, col_fil = st.columns([1, 2])
                 with col_per:
-                    nama_tab_tujuan = st.text_input(
-                        "Nama Tab Periode di Google Sheets:",
-                        value=periode_terdeteksi,
-                        help="Otomatis terdeteksi dari Tanggal Masuk. Bisa Anda ubah sebelum disimpan ke Google Sheets."
-                    )
+                    if mode_simpan_gsheet == "Tambah / Update Per Nama (Sisipan)":
+                        daftar_tab_db = ambil_daftar_tab_gsheet(gsheet_url)
+                        if daftar_tab_db:
+                            default_idx = (
+                                daftar_tab_db.index(periode_terdeteksi)
+                                if periode_terdeteksi in daftar_tab_db
+                                else 0
+                            )
+                            nama_tab_tujuan = st.selectbox(
+                                "Pilih Tab Periode Tujuan (Database):",
+                                options=daftar_tab_db,
+                                index=default_idx,
+                                help="Daftar tab otomatis diambil dari Google Sheets Master agar tidak salah ketik."
+                            )
+                        else:
+                            st.warning("Belum ada tab di Google Sheets atau link belum terhubung.")
+                            nama_tab_tujuan = st.text_input("Nama Tab Periode:", value=periode_terdeteksi)
+                    else:
+                        nama_tab_tujuan = st.text_input(
+                            "Nama Tab Periode di Google Sheets:",
+                            value=periode_terdeteksi,
+                            help="Otomatis terdeteksi dari Tanggal Masuk. Bisa Anda ubah sebelum disimpan ke Google Sheets."
+                        )
+
                 with col_fil:
                     filter_mentah = st.text_input(
                         "Filter Cepat NIP / Nama (Opsional):",
@@ -526,16 +564,6 @@ with tab1:
                 df_preview["Presentase Jam Kerja"] = (df_preview["Presentase Jam Kerja"] * 100).round(2).astype(str) + "%"
                 st.dataframe(df_preview, use_container_width=True, hide_index=True)
 
-                # Pilih mode simpan: Gelondongan (Timpa) atau Per-Nama (Sisipkan/Update ke tab yang sudah ada)
-                default_mode_idx = 1 if len(df_tampil) <= 5 else 0
-                mode_simpan_gsheet = st.radio(
-                    "Mode Simpan ke Google Sheets:",
-                    ["Timpa Semua (Gelondongan)", "Tambah / Update Per Nama (Sisipan)"],
-                    index=default_mode_idx,
-                    horizontal=True,
-                    help="Pilih 'Tambah / Update Per Nama' jika mengunggah susulan pegawai yang hilang tanpa menghapus data pegawai lain di bulan tersebut."
-                )
-
                 col_btn1, col_btn2 = st.columns(2)
                 with col_btn1:
                     if st.button(f"☁️ Simpan ke Google Sheets (Tab: {nama_tab_tujuan})", type="primary", use_container_width=True):
@@ -549,6 +577,7 @@ with tab1:
                                     df_tampil,
                                     mode_simpan=mode_simpan_gsheet
                                 )
+                                st.cache_data.clear()
                                 st.success(f"Mantap! Data masuk ke tab **{nama_tab_tujuan}** di **{judul_gsheet}** (Total sekarang: **{total_baris} pegawai**).")
 
                 with col_btn2:
@@ -594,15 +623,13 @@ with tab2:
                 with st.spinner(f"Memindai {len(semua_tab)} tab bulan di '{sh.title}'..."):
                     for ws in semua_tab:
                         records = ws.get_all_values()
-                        for row in records[1:]:  # Lewati baris header
+                        for row in records[1:]:
                             if len(row) < 5:
                                 continue
                             col0 = str(row[0]).strip()
                             col1 = str(row[1]).strip()
                             col2 = str(row[2]).strip() if len(row) > 2 else ""
 
-                            # Mendukung format Sheet1 6 kolom (No, NIP, Nama, Total Masuk, Efektif Kerja, Presentase)
-                            # Format baru 8 kolom: No, NIP, Nama, Total Masuk, Efektif Kerja, Terlambat, % Kehadiran, % Jam Kerja
                             # Format baru 9 kolom
                             if col0.isdigit() and len(row) >= 9:
                                 nip_val, nama_val = col1, col2
@@ -626,6 +653,9 @@ with tab2:
                                 hadir_val, total_val = row[2], row[3]
                                 telat_val, tdk_pulang_val = "0", "0"
                                 persen_hadir, persen_jam = row[4], row[4]
+
+                            if "%" in str(telat_val):
+                                telat_val = str(int(round(float(str(telat_val).replace("%", "").strip()) / 100)))
 
                             if keyword_clean in nip_val.upper() or keyword_clean in nama_val.upper():
                                 tampilan_b, thn_val, bln_val = ekstrak_periode_sort(ws.title)
